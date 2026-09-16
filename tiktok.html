@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Готово</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 32px;
+         background: #101014; color: #f2f2f5; }
+  main { max-width: 34rem; margin: 10vh auto; }
+  h1 { font-size: 1.4rem; }
+  code { display: block; word-break: break-all; background: #1c1c24;
+         border: 1px solid #2c2c38; border-radius: 10px; padding: 14px;
+         margin: 16px 0; color: #ffe57a; }
+  button { font: inherit; background: #4f7cff; color: #fff; border: 0;
+           border-radius: 10px; padding: 12px 18px; }
+  p.hint { color: #9a9aa8; }
+</style>
+<main>
+  <h1>Код получен</h1>
+  <p>Скопируй его и вставь в терминал, где запущена команда
+     <b>auth-tiktok</b>.</p>
+  <code id="code">кода нет — открой ссылку из терминала</code>
+  <button id="copy">Скопировать</button>
+  <p class="hint">Код одноразовый и живёт пару минут. Не успел — запусти
+     команду заново.</p>
+</main>
+<script>
+  // TikTok возвращает код в адресной строке: показываем его крупно, иначе
+  // на телефоне его придётся выковыривать из длинной ссылки.
+  const code = new URLSearchParams(location.search).get("code");
+  const box = document.getElementById("code");
+  if (code) box.textContent = decodeURIComponent(code);
+  document.getElementById("copy").onclick = () => {
+    navigator.clipboard.writeText(box.textContent);
+    document.getElementById("copy").textContent = "Скопировано";
+  };
+</script>
