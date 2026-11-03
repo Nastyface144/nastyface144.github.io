@@ -7,10 +7,19 @@
     TRACKER_KEY=... python3 tracker/tools/update.py patch.json
     TRACKER_KEY=... python3 tracker/tools/update.py --info   # когда было обновление и сколько сессий
 
-patch.json — список сессий в том виде, как их отдаёт list_sessions:
-{id, title, created_at, updated_at, origin, session_status, status_bucket,
- unread, recent_action, needs_action, area?}. Новые сессии добавляются,
-известные обновляются; направление (area) сохраняется, если в патче его нет.
+patch.json — либо список сессий, либо объект
+{"sessions": [...], "usage": [...], "digest": {"day": "YYYY-MM-DD", "text": "..."}}.
+
+sessions — как их отдаёт list_sessions: {id, title, created_at, updated_at, origin,
+session_status, status_bucket, unread, recent_action, needs_action, area?}.
+Новые сессии добавляются, известные обновляются; area сохраняется, если её нет.
+
+usage — расход токенов по ходам работы (из событий result):
+{u: uuid события, s: id сессии, t: время события ISO, i: input, o: output,
+ cr: cache read, cw: cache write, c: стоимость в $ по ценам API, n: число ходов}.
+Записи с уже известным u не добавляются повторно.
+
+digest — короткая сводка дня, перезаписывает прошлую за тот же день.
 """
 
 from __future__ import annotations
@@ -107,20 +116,44 @@ def main() -> None:
     key = _key()
     data = load(key)
     if sys.argv[1] == "--info":
-        print(f"обновлено {data['generated_at']}, сессий {len(data['sessions'])}")
+        last = data.get("usage", [])[-1]["t"] if data.get("usage") else "—"
+        print(f"обновлено {data['generated_at']}, сессий {len(data['sessions'])}, "
+              f"последний учтённый ход {last}")
         return
     known = {s["id"]: s for s in data["sessions"]}
     patch = json.loads(Path(sys.argv[1]).read_text())
+    if isinstance(patch, list):
+        patch = {"sessions": patch}
+    usage = {u["u"]: u for u in data.get("usage", [])}
+    new_usage = 0
+    for rec in patch.get("usage", []):
+        if rec["u"] in usage:
+            continue
+        rec = {k: rec[k] for k in ("u", "s", "t", "i", "o", "cr", "cw", "c", "n") if k in rec}
+        rec["t"] = _iso(rec["t"])
+        usage[rec["u"]] = rec
+        new_usage += 1
+    digests = dict(data.get("digests", {}))
+    if patch.get("digest"):
+        digests[patch["digest"]["day"]] = patch["digest"]["text"].strip()
     added = 0
-    for raw in patch:
+    for raw in patch.get("sessions", []):
         if raw["id"] not in known:
             added += 1
         known[raw["id"]] = normalize(raw, known.get(raw["id"]))
     sessions = sorted(known.values(), key=lambda s: s["last_active"], reverse=True)
     now = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
-    save(key, {"generated_at": now, "sessions": sessions})
+    records = sorted(usage.values(), key=lambda r: r["t"])
+    save(key, {
+        "generated_at": now,
+        "tokens_since": data.get("tokens_since") or (records[0]["t"][:10] if records else None),
+        "sessions": sessions,
+        "usage": records,
+        "digests": digests,
+    })
     waiting = sum(1 for s in sessions if s["status"] == "blocked")
-    print(f"всего {len(sessions)}, ждут ответа {waiting}, новых {added}, обновлено {now}")
+    print(f"всего {len(sessions)}, ждут ответа {waiting}, новых {added}, "
+          f"ходов с токенами +{new_usage}, обновлено {now}")
 
 
 if __name__ == "__main__":
