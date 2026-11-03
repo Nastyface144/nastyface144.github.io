@@ -5,6 +5,7 @@
 и никогда не хранится в репозитории.
 
     TRACKER_KEY=... python3 tracker/tools/update.py patch.json
+    TRACKER_KEY=... python3 tracker/tools/update.py --info   # когда было обновление и сколько сессий
 
 patch.json — список сессий в том виде, как их отдаёт list_sessions:
 {id, title, created_at, updated_at, origin, session_status, status_bucket,
@@ -105,6 +106,9 @@ def main() -> None:
         sys.exit(__doc__)
     key = _key()
     data = load(key)
+    if sys.argv[1] == "--info":
+        print(f"обновлено {data['generated_at']}, сессий {len(data['sessions'])}")
+        return
     known = {s["id"]: s for s in data["sessions"]}
     patch = json.loads(Path(sys.argv[1]).read_text())
     added = 0
