@@ -386,8 +386,8 @@ tr:last-child td { border-bottom: 0; }
   </section>
 
   <footer class="foot">
-    <span>Время примерное: от начала сессии до её последней активности, не больше 3 часов на сессию, засчитывается в день начала.</span>
-    <span>Токены — точный расход по каждому ходу работы в облачных сессиях, вместе с прочитанным кэшем. Сессии, запущенные на компьютере, отсюда не читаются и в токены не входят.</span>
+    <span>Облачные сессии: время примерное — от начала сессии до её последней активности, не больше 3 часов, засчитывается в день начала. Токены — точный расход по каждому ходу работы.</span>
+    <span id="footPc">Компьютер: время и токены точные, по журналам Claude Code на нём, после того как там запущена синхронизация. Пока её нет, сессии с компьютера считаются примерно и без токенов.</span>
     <span>Данные обновляются каждый вечер около 20:40 по Москве и открываются только по вашей ссылке.</span>
   </footer>
 </main>
@@ -503,18 +503,62 @@ tr:last-child td { border-bottom: 0; }
   const saved = (() => { try { return JSON.parse(store.get(VIEW_STORE) || '{}'); } catch { return {}; } })();
   const S = { data: null, sessions: [], byId: {}, usage: [], period: ['day', 'week', 'month', 'year'].includes(saved.period) ? saved.period : 'day', anchor: today(), metric: saved.metric === 'tokens' ? 'tokens' : 'time', showAll: false, key: null, loadedAt: 0 };
 
-  const prepare = (data) => {
+  const guessArea = (text) => {
+    const t = (text || '').toLowerCase();
+    if (/курсов|практич|вариант|лаборатор|реферат|диплом|отч[её]т/.test(t)) return 'Учёба';
+    if (/бот|bot|telegram|телеграм/.test(t)) return 'Telegram-боты';
+    if (/лендинг|landing|сайт|site|web/.test(t)) return 'Сайты и лендинги';
+    return 'Программы и автоматизация';
+  };
+  const prepare = (data, pc) => {
     S.sessions = data.sessions.map((s) => {
       const start = Date.parse(s.started), end = Math.max(start, Date.parse(s.last_active));
       const a = AREA[s.area] || AREA['Вопросы и идеи'];
-      return { ...s, start, end, area: a.name, ai: a.i, group: a.group, minutes: Math.max(1, Math.min(CAP, (end - start) / 6e4)), day: mskKey(start), endDay: mskKey(end), hour: mskHour(start) };
+      return { ...s, start, end, area: a.name, ai: a.i, group: a.group, minutes: Math.max(1, Math.min(CAP, (end - start) / 6e4)), day: mskKey(start), endDay: mskKey(end), hour: mskHour(start), onPc: s.origin === 'claude_code_cli' };
     });
     S.byId = Object.fromEntries(S.sessions.map((s) => [s.id, s]));
-    S.usage = (data.usage || []).map((u) => {
+    const timeItems = [], tokItems = [];
+    S.pcOnly = []; S.pcSince = null; S.pcAt = pc && pc.generated_at ? pc.generated_at : null;
+    if (pc && Array.isArray(pc.records) && pc.records.length) {
+      S.pcSince = pc.records.reduce((a, r) => (r.d < a ? r.d : a), '9999-12-31');
+      const bridge = S.sessions.filter((s) => s.onPc);
+      const map = {};
+      for (const [sid, info] of Object.entries(pc.sessions || {})) {
+        const first = Date.parse(info.first), last = Date.parse(info.last);
+        const match = bridge.find((b) => Math.abs(b.start - first) <= 15 * 6e4);
+        const a = AREA[match ? match.area : guessArea((info.project || '') + ' ' + (info.title || ''))];
+        map[sid] = { match, a, info, first, last, minutes: 0 };
+      }
+      for (const r of pc.records) {
+        const m = map[r.s] || { a: AREA['Программы и автоматизация'], minutes: 0 };
+        m.minutes += r.m || 0;
+        const ref = m.match ? m.match.id : 'pc:' + r.s;
+        if (r.m) timeItems.push({ day: r.d, hour: r.h, group: m.a.group, ai: m.a.i, minutes: r.m, s: ref });
+        const total = (r.i || 0) + (r.o || 0) + (r.cr || 0) + (r.cw || 0);
+        if (total) tokItems.push({ day: r.d, hour: r.h, group: m.a.group, ai: m.a.i, total, o: r.o || 0, cr: r.cr || 0, c: 0, s: ref, pc: true });
+      }
+      for (const [sid, m] of Object.entries(map)) {
+        if (m.match) { m.match.pcMinutes = (m.match.pcMinutes || 0) + m.minutes; continue; }
+        S.pcOnly.push({
+          id: 'pc:' + sid, title: m.info.title || ('Сессия в папке ' + (m.info.project || '—')), url: null,
+          area: m.a.name, ai: m.a.i, group: m.a.group, status: 'pc', status_label: 'Терминал на компьютере',
+          start: m.first, end: m.last, day: mskKey(m.first), endDay: mskKey(m.last), hour: mskHour(m.first),
+          minutes: m.minutes, pcMinutes: m.minutes, summary: m.info.project ? 'Папка: ' + m.info.project : '', todo: '',
+        });
+      }
+    }
+    for (const s of S.sessions) {
+      if (s.onPc && S.pcSince && s.day >= S.pcSince) { s.replaced = true; continue; }
+      timeItems.push({ day: s.day, hour: s.hour, group: s.group, ai: s.ai, minutes: s.minutes, s: s.id });
+    }
+    for (const u of data.usage || []) {
       const ms = Date.parse(u.t), s = S.byId[u.s];
-      return { ...u, ms, day: mskKey(ms), hour: mskHour(ms), total: (u.i || 0) + (u.o || 0) + (u.cr || 0) + (u.cw || 0), group: s ? s.group : 'create', ai: s ? s.ai : null };
-    });
+      tokItems.push({ day: mskKey(ms), hour: mskHour(ms), group: s ? s.group : 'create', ai: s ? s.ai : null, total: (u.i || 0) + (u.o || 0) + (u.cr || 0) + (u.cw || 0), o: u.o || 0, cr: u.cr || 0, c: u.c || 0, s: u.s });
+    }
+    S.timeItems = timeItems; S.tokItems = tokItems;
+    S.all = S.sessions.concat(S.pcOnly);
   };
+  const minutesOf = (s) => (s.replaced ? (s.pcMinutes || 0) : s.minutes);
 
   const showLock = (msg) => { $('#app').hidden = true; $('#lock').hidden = false; $('#lockErr').textContent = msg || ''; };
   const open = async (k, first) => {
@@ -522,8 +566,10 @@ tr:last-child td { border-bottom: 0; }
       const res = await fetch('data.enc?t=' + Date.now(), { cache: 'no-store' });
       if (!res.ok) throw new Error('net');
       const data = await decrypt(k, await res.text());
+      let pc = null;
+      try { const r2 = await fetch('pc.enc?t=' + Date.now(), { cache: 'no-store' }); if (r2.ok) pc = await decrypt(k, await r2.text()); } catch { pc = null; }
       S.data = data; S.key = k; S.loadedAt = Date.now();
-      prepare(data);
+      prepare(data, pc);
       $('#lock').hidden = true; $('#app').hidden = false;
       render(first);
       return true;
@@ -572,20 +618,22 @@ tr:last-child td { border-bottom: 0; }
   /* ---------- aggregation ---------- */
   const inR = (k, r) => k >= r.from && k <= r.to;
   const agg = (r) => {
-    const started = S.sessions.filter((s) => inR(s.day, r));
-    const usage = S.usage.filter((u) => inR(u.day, r));
+    const started = S.all.filter((s) => inR(s.day, r));
+    const ti = S.timeItems.filter((x) => inR(x.day, r));
+    const tk = S.tokItems.filter((x) => inR(x.day, r));
     const byG = { create: 0, other: 0 };
-    started.forEach((s) => { byG[s.group] += s.minutes; });
+    ti.forEach((x) => { byG[x.group] += x.minutes; });
     return {
-      started, usage, byG,
-      minutes: started.reduce((a, s) => a + s.minutes, 0),
-      tokens: usage.reduce((a, u) => a + u.total, 0),
-      out: usage.reduce((a, u) => a + (u.o || 0), 0),
-      cache: usage.reduce((a, u) => a + (u.cr || 0), 0),
-      cost: usage.reduce((a, u) => a + (u.c || 0), 0),
+      started, ti, tk, byG,
+      minutes: ti.reduce((a, x) => a + x.minutes, 0),
+      tokens: tk.reduce((a, x) => a + x.total, 0),
+      out: tk.reduce((a, x) => a + x.o, 0),
+      cache: tk.reduce((a, x) => a + x.cr, 0),
+      cost: tk.reduce((a, x) => a + x.c, 0),
+      pcTokens: tk.filter((x) => x.pc).reduce((a, x) => a + x.total, 0),
     };
   };
-  const tokensSince = () => S.data.tokens_since || (S.usage[0] && S.usage[0].day) || null;
+  const tokensSince = () => { const c = S.data.tokens_since || null, p = S.pcSince; return c && p ? (c < p ? c : p) : c || p; };
 
   const countTo = (node, value, fmt) => {
     const from = Number(node.dataset.v || 0);
@@ -609,6 +657,7 @@ tr:last-child td { border-bottom: 0; }
   const render = (first) => {
     const gen = S.data.generated_at ? new Date(S.data.generated_at) : null;
     $('#updated').textContent = gen ? `обновлено ${clean(fUpd.format(gen))}, ${fTime.format(gen)}` : '';
+    if (S.pcAt) { const pg = new Date(S.pcAt); $('#footPc').textContent = `Компьютер: время и токены точные, по журналам Claude Code на нём. Данные с компьютера от ${clean(fUpd.format(pg))}, ${fTime.format(pg)}; Claude Code хранит журналы около 30 дней, поэтому история с компьютера начинается с ${fDayMonth.format(kd(S.pcSince))}.`; }
     S.r = range(S.period, S.anchor);
     S.prev = range(S.period, shift(S.period, S.anchor, -1));
     $('#plabel').textContent = labelOf(S.period, S.r);
@@ -643,7 +692,8 @@ tr:last-child td { border-bottom: 0; }
       if (unit) tokEl.append(el('small', '', unit));
       const sub = [];
       if (c.tokens) sub.push(`вывод ${tok(c.out)}, кэш ${tok(c.cache)}`);
-      if (c.cost) sub.push(`≈ ${usd.format(c.cost)} по ценам API`);
+      if (c.pcTokens) sub.push(`с компьютера ${tok(c.pcTokens)}`);
+      if (c.cost) sub.push(`облако ≈ ${usd.format(c.cost)} по ценам API`);
       if (S.r.from < since) sub.push('учёт с ' + fDayMonth.format(kd(since)));
       $('#sTok').textContent = sub.join(' · ');
       delta($('#dTok'), c.tokens, o.tokens, null, S.prev.from >= since);
@@ -670,12 +720,12 @@ tr:last-child td { border-bottom: 0; }
     const B = buckets();
     const tokensMode = S.metric === 'tokens';
     $('#chartTitle').textContent = 'Активность ' + B.title;
-    $('#chartNote').textContent = tokensMode ? 'Токены по времени каждого хода работы.' : 'Примерное время, по часу и дню начала сессии.';
+    $('#chartNote').textContent = tokensMode ? 'Токены по времени каждого хода работы.' : (S.pcSince ? 'Облако — примерно по началу сессии, компьютер — точно по сообщениям.' : 'Примерное время, по часу и дню начала сессии.');
     const data = B.list.map((b) => ({ ...b, c: 0, o: 0 }));
     const idx = new Map(data.map((d, i) => [d.k, i]));
     const add = (dk, hour, group, v) => { const k = B.of(dk, hour); if (k == null || !idx.has(k)) return; data[idx.get(k)][group === 'other' ? 'o' : 'c'] += v; };
-    if (tokensMode) S.cur.usage.forEach((u) => add(u.day, u.hour, u.group, u.total));
-    else S.cur.started.forEach((s) => add(s.day, s.hour, s.group, s.minutes));
+    if (tokensMode) S.cur.tk.forEach((u) => add(u.day, u.hour, u.group, u.total));
+    else S.cur.ti.forEach((x) => add(x.day, x.hour, x.group, x.minutes));
     const W = Math.max(280, box.clientWidth || 600), H = 210, top = 8, bottom = 22;
     const max = Math.max(0, ...data.map((d) => d.c + d.o));
     let step;
@@ -730,10 +780,12 @@ tr:last-child td { border-bottom: 0; }
     }
   };
 
-  const areaStats = (c) => AREAS.map((a) => {
-    const ss = c.started.filter((s) => s.area === a.name);
-    return { ...a, minutes: ss.reduce((x, s) => x + s.minutes, 0), n: ss.length, tokens: c.usage.filter((u) => u.ai === AREA[a.name].i).reduce((x, u) => x + u.total, 0) };
-  });
+  const areaStats = (c) => AREAS.map((a, ai) => ({
+    ...a,
+    minutes: c.ti.filter((x) => x.ai === ai).reduce((x, y) => x + y.minutes, 0),
+    n: c.started.filter((s) => s.ai === ai).length,
+    tokens: c.tk.filter((x) => x.ai === ai).reduce((x, y) => x + y.total, 0),
+  }));
 
   const renderDigest = () => {
     const c = S.cur, box = $('#digest');
@@ -743,7 +795,7 @@ tr:last-child td { border-bottom: 0; }
     const own = S.period === 'day' ? digests[S.r.from] : null;
     if (own) parts.push(el('p', '', own));
     const n = c.started.length;
-    if (!n && !c.tokens) {
+    if (!n && !c.tokens && !c.minutes) {
       parts.push(el('p', 'muted', S.r.from > today() ? 'Этот период ещё не наступил.' : 'В этом периоде вы с Claude не работали.'));
     } else {
       const st = areaStats(c).filter((a) => a.minutes).sort((a, b) => b.minutes - a.minutes);
@@ -755,7 +807,7 @@ tr:last-child td { border-bottom: 0; }
       if (tot) t += ` На создание — ${Math.round(c.byG.create / tot * 100)}% времени.`;
       if (S.period !== 'day') {
         const byDay = new Map();
-        c.started.forEach((s) => byDay.set(s.day, (byDay.get(s.day) || 0) + s.minutes));
+        c.ti.forEach((x) => byDay.set(x.day, (byDay.get(x.day) || 0) + x.minutes));
         const best = [...byDay].sort((a, b) => b[1] - a[1])[0];
         if (best) t += ` Самый плотный день — ${fWeekday.format(kd(best[0]))}, ${fDayMonth.format(kd(best[0]))}.`;
         const end = S.r.to < today() ? S.r.to : today();
@@ -766,10 +818,10 @@ tr:last-child td { border-bottom: 0; }
       }
       parts.push(el('p', own ? 'muted' : '', t));
       if (S.period !== 'day') {
-        const top = c.started.slice().sort((a, b) => b.minutes - a.minutes).slice(0, 3);
+        const top = c.started.slice().sort((a, b) => minutesOf(b) - minutesOf(a)).slice(0, 3).filter((x) => minutesOf(x) >= 1);
         if (top.length) {
           const ul = el('ul', 'keys');
-          top.forEach((s) => { const li = el('li'); const a = el('a'); a.href = s.url; a.target = '_blank'; a.rel = 'noopener'; a.append(el('span', '', s.title), el('span', '', dur(s.minutes))); li.append(a); ul.append(li); });
+          top.forEach((s) => { const li = el('li'); const a = el(s.url ? 'a' : 'div'); if (s.url) { a.href = s.url; a.target = '_blank'; a.rel = 'noopener'; } a.style.display = 'flex'; a.style.justifyContent = 'space-between'; a.style.gap = '10px'; a.style.padding = '7px 0'; a.style.borderTop = '1px solid var(--line)'; a.style.fontSize = '13.5px'; a.style.textDecoration = 'none'; a.append(el('span', '', s.title), el('span', '', dur(minutesOf(s)))); li.append(a); ul.append(li); });
           parts.push(ul);
         }
         const ds = Object.entries(digests).filter(([k]) => inR(k, S.r)).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 31);
@@ -804,7 +856,7 @@ tr:last-child td { border-bottom: 0; }
   };
 
   const item = (s, right, extra) => {
-    const a = el('a', 'item'); a.href = s.url; a.target = '_blank'; a.rel = 'noopener';
+    const a = el(s.url ? 'a' : 'div', 'item'); if (s.url) { a.href = s.url; a.target = '_blank'; a.rel = 'noopener'; }
     const q = el('span', 'sq'); q.style.background = AREAS[s.ai].color;
     const mid = el('div');
     mid.append(el('div', 'item-t', s.title));
@@ -818,9 +870,10 @@ tr:last-child td { border-bottom: 0; }
   };
   const renderSessions = () => {
     const r = S.r;
-    const list = S.sessions.filter((s) => s.day <= r.to && s.endDay >= r.from).sort((a, b) => b.end - a.end);
-    const tb = new Map();
-    S.cur.usage.forEach((u) => tb.set(u.s, (tb.get(u.s) || 0) + u.total));
+    const list = S.all.filter((s) => s.day <= r.to && s.endDay >= r.from).sort((a, b) => b.end - a.end);
+    const tb = new Map(), tm = new Map();
+    S.cur.tk.forEach((u) => tb.set(u.s, (tb.get(u.s) || 0) + u.total));
+    S.cur.ti.forEach((x) => tm.set(x.s, (tm.get(x.s) || 0) + x.minutes));
     const LIMIT = 8;
     const shown = S.showAll ? list : list.slice(0, LIMIT);
     $('#more').hidden = list.length <= LIMIT || S.showAll;
@@ -828,7 +881,7 @@ tr:last-child td { border-bottom: 0; }
     if (!list.length) { $('#sessList').replaceChildren(el('div', 'empty', 'В этом периоде сессий не было.')); return; }
     $('#sessList').replaceChildren(...shown.map((s) => {
       const right = el('div', 'item-r');
-      right.append(el('div', '', inR(s.day, r) ? dur(s.minutes) : '—'));
+      right.append(el('div', '', tm.get(s.id) ? dur(tm.get(s.id)) : '—'));
       if (tb.get(s.id)) right.append(el('span', '', tok(tb.get(s.id))));
       const extra = inR(s.day, r) ? (S.period === 'day' ? 'в ' + fTime.format(new Date(s.start)) : clean(fShort.format(kd(s.day)))) : 'начата ' + clean(fShort.format(kd(s.day)));
       return item(s, right, extra);
@@ -851,13 +904,13 @@ tr:last-child td { border-bottom: 0; }
   const renderHeat = () => {
     if (!S.sessions.length) return;
     const t = today();
-    const first = S.sessions.reduce((a, s) => (s.day < a ? s.day : a), t);
+    const first = S.all.reduce((a, s) => (s.day < a ? s.day : a), t);
     const end = addDays(t, 6 - wd(t));
     let w0 = addDays(first, -wd(first));
     if ((kms(end) - kms(w0)) / DAY / 7 > 52) w0 = addDays(end, -(53 * 7) + 1);
     const nW = Math.round((kms(end) - kms(w0)) / DAY / 7) + 1;
     const byDay = new Map();
-    S.sessions.forEach((s) => { const o = byDay.get(s.day) || { c: 0, o: 0 }; o[s.group === 'other' ? 'o' : 'c'] += s.minutes; byDay.set(s.day, o); });
+    S.timeItems.forEach((x) => { const o = byDay.get(x.day) || { c: 0, o: 0 }; o[x.group === 'other' ? 'o' : 'c'] += x.minutes; byDay.set(x.day, o); });
     const wrap = $('#heatWrap');
     const c = Math.max(11, Math.min(22, Math.floor((wrap.clientWidth - 30) / nW) - 3));
     $('#heat').style.setProperty('--c', c + 'px');
